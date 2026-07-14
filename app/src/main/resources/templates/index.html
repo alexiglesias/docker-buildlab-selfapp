@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+    <meta charset="UTF-8">
+    <title>Selfapp Lite</title>
+    <style>
+        body { font-family: sans-serif; max-width: 640px; margin: 40px auto; color: #1a1510; }
+        h1 { border-bottom: 2px solid #1a1510; padding-bottom: 8px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+        form { margin-top: 24px; display: flex; gap: 8px; }
+        input { padding: 6px 10px; border: 1px solid #ccc; flex: 1; }
+        button { padding: 6px 16px; background: #1a6b3a; color: white; border: none; cursor: pointer; }
+        button:hover { background: #145c30; }
+        .btn-delete { padding: 4px 10px; background: #c0392b; color: white; border: none; cursor: pointer; }
+        .btn-delete:hover { background: #a93226; }
+    </style>
+</head>
+<body>
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h1 style="border:none; margin:0; padding:0;">Selfapp Lite</h1>
+        <form th:action="@{/logout}" method="post" style="margin:0;">
+            <button type="submit" style="background:#7a4f00;">Logout</button>
+        </form>
+    </div>
+    <p>Self-contained sample app for Project 5 — Docker multi-stage builds.</p>
+
+    <table>
+        <tr>
+            <th>ID</th><th>Username</th><th>Email</th>
+            <th sec:authorize="hasRole('ADMIN')">Action</th>
+        </tr>
+        <tr th:each="user : ${users}">
+            <td th:text="${user.id}"></td>
+            <td th:text="${user.username}"></td>
+            <td th:text="${user.email}"></td>
+            <td sec:authorize="hasRole('ADMIN')">
+                <form th:action="@{/delete/{id}(id=${user.id})}" method="post" style="margin:0;">
+                    <button type="submit" class="btn-delete">Delete</button>
+                </form>
+            </td>
+        </tr>
+    </table>
+
+    <form th:action="@{/add}" method="post" sec:authorize="hasRole('ADMIN')">
+        <input type="text" name="username" placeholder="Username" required>
+        <input type="email" name="email" placeholder="Email" required>
+        <button type="submit">Add user</button>
+    </form>
+</body>
+</html>

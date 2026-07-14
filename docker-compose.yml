@@ -1,0 +1,70 @@
+
+services:
+  selfdb:
+    image: mysql:8.0
+    container_name: selfdb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: selfapplite
+      MYSQL_USER: selfuser
+      MYSQL_PASSWORD: selfpass
+    volumes:
+      - selfdb-data:/var/lib/mysql
+    networks:
+      - self-net
+
+  # Included to preserve the multi-service orchestration exercise.
+  # The sample app doesn't use these yet - wiring them in is a good
+  # stretch task once the base stack is working.
+  selfcache:
+    image: memcached:1.6-alpine
+    container_name: selfcache
+    restart: unless-stopped
+    networks:
+      - self-net
+
+  selfmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: selfmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - self-net
+
+  selfapp:
+    build: ./app
+    image: ${DOCKERHUB_USER:-yourname}/selfapp-lite:v1
+    container_name: selfapp
+    restart: unless-stopped
+    depends_on:
+      - selfdb
+    environment:
+      DB_HOST: selfdb
+      DB_PORT: 3306
+      DB_NAME: selfapplite
+      DB_USER: selfuser
+      DB_PASS: selfpass
+    networks:
+      - self-net
+
+  selfweb:
+    build: ./web
+    image: ${DOCKERHUB_USER:-yourname}/selfapp-lite-web:v1
+    container_name: selfweb
+    restart: unless-stopped
+    depends_on:
+      - selfapp
+    ports:
+      - "80:80"
+    networks:
+      - self-net
+
+volumes:
+  selfdb-data:
+
+networks:
+  self-net:
+    driver: bridge

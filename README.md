@@ -15,15 +15,9 @@
 
 ## What's in here
 
-A small Spring Boot user-management app, written for this project, packaged as
-Docker images and wired together with Docker Compose. Nginx is the only container
-exposed to the host and reverse-proxies every request to the Spring Boot app,
-which stores its data in MySQL on a named volume. Logging in as an admin lets you
-add and delete users; a regular user can only view the list. The app image is
-built in two stages, so Maven, the JDK and the source code never reach the image
-that runs. Hibernate creates the database table on first start, so there is no
-schema to import. Memcached and RabbitMQ are also part of the stack, ready for the
-app to use as caching and messaging are added.
+A small Spring Boot user-management app, written for this project, packaged as Docker images and wired together with Docker Compose. Nginx is the only container exposed to the host and reverse-proxies every request to the Spring Boot app, which stores its data in MySQL on a named volume. 
+Logging in as an admin lets you add and delete users; a regular user can only view the list. The app image is built in two stages, so Maven, the JDK and the source code never reach the image that runs. 
+Hibernate creates the database table on first start, so there is no schema to import. Memcached and RabbitMQ are also part of the stack, ready for the app to use as caching and messaging are added.
 
 ## Requirements
 
@@ -72,12 +66,7 @@ flowchart TD
     linkStyle default stroke:#888780,stroke-width:1.5px
 ```
 
-All five containers share the `self-net` bridge network and reach each other by
-service name: Nginx forwards to `selfapp:8080`, and the app connects to `selfdb`
-through the `DB_HOST` environment variable. Only Nginx publishes a port to the
-host, so MySQL, Memcached and RabbitMQ are unreachable from outside the stack.
-MySQL data lives in the `selfdb-data` volume and survives container restarts
-and rebuilds.
+All five containers share the `self-net` bridge network and reach each other by service name: Nginx forwards to `selfapp:8080`, and the app connects to `selfdb` through the `DB_HOST` environment variable. Only Nginx publishes a port to the host, so MySQL, Memcached and RabbitMQ are unreachable from outside the stack. MySQL data lives in the `selfdb-data` volume and survives container restarts and rebuilds.
 
 ### Build flow (build time)
 
@@ -111,9 +100,7 @@ flowchart LR
     linkStyle default stroke:#888780,stroke-width:1.5px
 ```
 
-Dependencies are downloaded in their own layer, before the source code is copied
-in. Changing a Java file therefore only rebuilds the last layer, and Maven does
-not re-download every dependency on each build.
+Dependencies are downloaded in their own layer, before the source code is copied in. Changing a Java file therefore only rebuilds the last layer, and Maven does not re-download every dependency on each build.
 
 ### Service responsibilities
 
@@ -148,8 +135,7 @@ docker compose ps
 open http://localhost        # macOS; on Linux use xdg-open, or just open the URL in your browser
 ```
 
-On the first start MySQL initialises its data directory and Spring Boot creates
-the `user` table, so the app takes around 30 seconds to become available.
+On the first start MySQL initialises its data directory and Spring Boot creates the `user` table, so the app takes around 30 seconds to become available.
 
 ## Application credentials
 
@@ -173,15 +159,13 @@ docker run --rm --entrypoint sh ${DOCKERHUB_USER:-yourname}/selfapp-lite:v1 -c '
 docker compose exec selfapp id
 ```
 
-The runtime image contains only the JRE and `app.jar`, and `id` reports
-`uid=1001`.
+The runtime image contains only the JRE and `app.jar`, and `id` reports `uid=1001`.
 
 ## Health checks
 
 Both images define a Docker `HEALTHCHECK`:
 
-- **`selfapp`** calls Spring Boot Actuator at `/actuator/health`. This is the only
-  endpoint that is reachable without logging in.
+- **`selfapp`** calls Spring Boot Actuator at `/actuator/health`. This is the only   endpoint that is reachable without logging in.
 - **`selfweb`** requests `/` from Nginx.
 
 ```bash
@@ -201,8 +185,7 @@ This pushes `your_username/selfapp-lite:v1` and `your_username/selfapp-lite-web:
 
 ## Configuration
 
-The app reads its database settings from environment variables, which are set in
-`docker-compose.yml` and resolved in `application.properties`:
+The app reads its database settings from environment variables, which are set in `docker-compose.yml` and resolved in `application.properties`:
 
 | Variable | Default | Purpose |
 |---|---|---|

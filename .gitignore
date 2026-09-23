@@ -1,13 +1,9 @@
 # macOS
 .DS_Store
 
-# AWS — never commit real config (contains credentials and IPs)
-aws-lift-and-shift/config.sh
-
 # Maven build output
 app/target/
 
 # Environment files
 .env
 *.env.local
-.DS_Store

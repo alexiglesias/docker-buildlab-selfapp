@@ -1,72 +1,85 @@
 # docker-buildlab-selfapp
 
-> A containerised three-tier Java web app (Nginx → Spring Boot → MySQL) built with
-> multi-stage Dockerfiles and orchestrated with Docker Compose. The final app image
-> ships only a JRE and the compiled `.jar`, runs as a non-root user and reports its
-> own health. The whole stack comes up with one command and needs no external repo
-> or SQL dump. Runs on any machine with Docker, including Apple Silicon Macs.
+> A containerised three-tier Java web app (Nginx → Spring Boot → MySQL) with RabbitMQ
+> messaging, built with multi-stage Dockerfiles and orchestrated with Docker Compose.
+> Every service has a health check and starts only when its dependencies are healthy.
+> The app image ships only a JRE and the compiled `.jar` and runs as a non-root user.
+> Secrets stay in a git-ignored `.env`. Runs on any machine with Docker, including Apple Silicon Macs.
 
 [![docker](https://img.shields.io/badge/docker%20compose-v2-blue)](https://docs.docker.com/compose/)
-[![services](https://img.shields.io/badge/services-5-brightgreen)](./docker-compose.yml)
+[![services](https://img.shields.io/badge/services-4-brightgreen)](./docker-compose.yml)
 [![java](https://img.shields.io/badge/java-17-orange)](https://adoptium.net/)
 [![spring boot](https://img.shields.io/badge/spring%20boot-3.3-brightgreen)](https://spring.io/projects/spring-boot)
 [![mysql](https://img.shields.io/badge/mysql-8.0-blue)](https://www.mysql.com/)
+[![rabbitmq](https://img.shields.io/badge/rabbitmq-3.13-orange)](https://www.rabbitmq.com/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 ## What's in here
 
-A small Spring Boot user-management app, written for this project, packaged as Docker images and wired together with Docker Compose. Nginx is the only container exposed to the host and reverse-proxies every request to the Spring Boot app, which stores its data in MySQL on a named volume. 
-Logging in as an admin lets you add and delete users; a regular user can only view the list. The app image is built in two stages, so Maven, the JDK and the source code never reach the image that runs. 
-Hibernate creates the database table on first start, so there is no schema to import. Memcached and RabbitMQ are also part of the stack, ready for the app to use as caching and messaging are added.
+A small Spring Boot user-management app, written for this project, packaged as Docker
+images and wired together with Docker Compose. Nginx is the entry point and
+reverse-proxies every request to the Spring Boot app, which stores users in MySQL on a
+named volume. Logging in as an admin lets you add and delete users; a regular user can
+only view the list. Every time a user is added, the app publishes a `user.created`
+event to RabbitMQ and a listener in the app consumes and logs it.
+
+The app image is built in two stages, so Maven, the JDK and the source code never reach
+the image that runs. Compose starts the services in dependency order using health
+checks, and Hibernate creates the database table on first start, so there is no schema
+to import.
 
 ## Requirements
 
 - **Docker Engine 24+** or **Docker Desktop**, with the **Compose v2** plugin
   (`docker compose version` should work)
-- **~2 GB free RAM** for the five containers
-- **Port 80 free** on the host
+- **~2 GB free RAM** for the four containers
+- **Ports 80 and 15672 free** on the host
 - *Optional:* a **Docker Hub** account, to publish the images
 
 No local Java or Maven installation is needed: the build runs inside a container.
 
 ## Architecture
 
-### Request flow (run time)
+### Request and messaging flow (run time)
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 40, 'rankSpacing': 50}}}%%
 flowchart TD
-    BR["<b>Browser</b><br/>http://localhost"]
+    BR["<b>Browser</b><br/>your machine"]
 
     subgraph NET["Docker bridge network · self-net"]
         direction TB
         WEB["<b>selfweb · Nginx 1.27</b><br/>reverse proxy · :80"]
         APP["<b>selfapp · Spring Boot 3.3</b><br/>Java 17 JRE · :8080"]
         DB["<b>selfdb · MySQL 8.0</b><br/>selfapplite DB · :3306"]
-        MC["<b>selfcache · Memcached</b><br/>:11211 · not wired yet"]
-        MQ["<b>selfmq · RabbitMQ</b><br/>:5672 · not wired yet"]
+        MQ["<b>selfmq · RabbitMQ 3.13</b><br/>queue user.created · :5672"]
     end
 
     VOL[("selfdb-data<br/>named volume")]
 
-    BR -->|"HTTP :80 (only published port)"| WEB
+    BR -->|"HTTP :80"| WEB
+    BR -->|"management UI :15672"| MQ
     WEB -->|"proxy_pass :8080"| APP
     APP -->|"JDBC :3306"| DB
+    APP <-->|"AMQP :5672<br/>publish / consume"| MQ
     DB --- VOL
-    APP -.-> MC
-    APP -.-> MQ
 
     classDef host fill:#F1EFE8,stroke:#5F5E5A,stroke-width:1px,color:#2C2C2A
     classDef tier fill:#E1F5EE,stroke:#0F6E56,stroke-width:1px,color:#04342C
-    classDef idle fill:#F1EFE8,stroke:#888780,stroke-width:1px,stroke-dasharray:4 4,color:#5F5E5A
+    classDef msg fill:#EEEDFE,stroke:#534AB7,stroke-width:1px,color:#26215C
     class BR,VOL host
     class WEB,APP,DB tier
-    class MC,MQ idle
+    class MQ msg
     style NET fill:transparent,stroke:#888780,stroke-width:1px,stroke-dasharray:5 5,color:#888780
     linkStyle default stroke:#888780,stroke-width:1.5px
 ```
 
-All five containers share the `self-net` bridge network and reach each other by service name: Nginx forwards to `selfapp:8080`, and the app connects to `selfdb` through the `DB_HOST` environment variable. Only Nginx publishes a port to the host, so MySQL, Memcached and RabbitMQ are unreachable from outside the stack. MySQL data lives in the `selfdb-data` volume and survives container restarts and rebuilds.
+All four containers share the `self-net` bridge network and reach each other by service
+name through Docker's internal DNS: Nginx forwards to `selfapp:8080`, and the app
+connects to `selfdb` and `selfmq` through environment variables. From the host, only
+two ports are reachable: 80 (Nginx) and 15672 (the RabbitMQ management UI). MySQL
+(3306) and AMQP (5672) stay inside the network. MySQL data lives in the `selfdb-data`
+volume and survives container restarts and rebuilds.
 
 ### Build flow (build time)
 
@@ -100,17 +113,18 @@ flowchart LR
     linkStyle default stroke:#888780,stroke-width:1.5px
 ```
 
-Dependencies are downloaded in their own layer, before the source code is copied in. Changing a Java file therefore only rebuilds the last layer, and Maven does not re-download every dependency on each build.
+Dependencies are downloaded in their own layer, before the source code is copied in.
+Changing a Java file therefore only rebuilds the last layers, and Maven does not
+re-download every dependency on each build.
 
 ### Service responsibilities
 
 | Service | Image | Port | Role |
 |---|---|---|---|
-| `selfweb` | built from `web/` (Nginx 1.27 Alpine) | 80 → host | Reverse proxy, the only entry point |
-| `selfapp` | built from `app/` (multi-stage, JRE 17) | 8080 (internal) | Spring Boot app: login, list, add and delete users |
+| `selfweb` | built from `web/` (Nginx 1.27 Alpine) | 80 → host | Reverse proxy, the entry point for the app |
+| `selfapp` | built from `app/` (multi-stage, JRE 17) | 8080 (internal) | Spring Boot app: login, list, add and delete users, publish and consume events |
 | `selfdb` | `mysql:8.0` | 3306 (internal) | `selfapplite` database on the `selfdb-data` volume |
-| `selfcache` | `memcached:1.6-alpine` | 11211 (internal) | Cache layer, reserved for the next iteration |
-| `selfmq` | `rabbitmq:3.13-management-alpine` | 5672 (internal) | Message broker, reserved for the next iteration |
+| `selfmq` | `rabbitmq:3.13-management-alpine` | 5672 (internal), 15672 → host | Message broker for `user.created` events, with the management UI |
 
 ## Quick start
 
@@ -119,8 +133,8 @@ Dependencies are downloaded in their own layer, before the source code is copied
 git clone https://github.com/alexiglesias/docker-buildlab-selfapp.git
 cd docker-buildlab-selfapp
 
-# 2. (Optional) Set your Docker Hub username, used to tag the images
-export DOCKERHUB_USER=your_username
+# 2. Create your .env from the template and set your own passwords
+cp .env.example .env
 
 # 3. Build both images (the first build downloads Maven dependencies)
 docker compose build
@@ -128,14 +142,16 @@ docker compose build
 # 4. Start the full stack in the background
 docker compose up -d
 
-# 5. Check that all five containers are running
+# 5. Check that all four containers are healthy
 docker compose ps
 
 # 6. Open the application and log in (see credentials below)
 open http://localhost        # macOS; on Linux use xdg-open, or just open the URL in your browser
 ```
 
-On the first start MySQL initialises its data directory and Spring Boot creates the `user` table, so the app takes around 30 seconds to become available.
+On the first start MySQL initialises its data directory before it reports healthy, so
+the whole stack takes around a minute to come up. Compose waits for each service
+automatically.
 
 ## Application credentials
 
@@ -145,6 +161,51 @@ Demo-only users, held in memory by Spring Security:
 |---|---|---|---|
 | `admin_self` | `admin_self` | ADMIN | View, add and delete users |
 | `test_self` | `test_self` | USER | View the user list |
+
+The RabbitMQ management UI at `http://localhost:15672` uses `RABBITMQ_USER` and
+`RABBITMQ_PASS` from your `.env`.
+
+## Messaging with RabbitMQ
+
+When an admin adds a user, the app saves it to MySQL and then publishes a message to
+the `user.created` queue. `UserCreatedListener`, running in the same app, consumes the
+message and logs it. If RabbitMQ is unavailable, the user is still saved and the app
+logs a warning instead of failing the request.
+
+```bash
+# After adding a user in the web UI, see the event being consumed
+docker compose logs selfapp | grep user.created
+```
+
+In the management UI, open **Queues → user.created** to see the message rate. The
+queue itself stays at zero messages, because the listener consumes each one
+immediately.
+
+The queue is declared durable, but the broker has no volume, so queues and messages
+are recreated from scratch after `docker compose down`. That is intentional for a
+demo; a persistent broker would mount a volume at `/var/lib/rabbitmq`.
+
+## Health checks
+
+Every service defines a health check, and Compose uses them to order startup:
+
+| Service | Defined in | Check |
+|---|---|---|
+| `selfdb` | `docker-compose.yml` | `mysqladmin ping` over TCP (`127.0.0.1`), so it passes only once the real server is up, not the temporary one MySQL runs during initialisation |
+| `selfmq` | `docker-compose.yml` | `rabbitmq-diagnostics ping` |
+| `selfapp` | `app/Dockerfile` | Spring Boot Actuator at `/actuator/health`, which also includes the database and RabbitMQ connections |
+| `selfweb` | `web/Dockerfile` | Requests `/` from Nginx |
+
+```bash
+docker inspect --format '{{.Name}} {{.State.Health.Status}}' selfdb selfmq selfapp selfweb
+
+# Failure test: stop the broker and watch the app report DOWN
+docker compose stop selfmq
+curl http://localhost/actuator/health     # {"status":"DOWN"}
+docker compose start selfmq
+```
+
+`/actuator/health` and `/login` are the only endpoints reachable without logging in.
 
 ## Verifying the multi-stage build
 
@@ -161,45 +222,42 @@ docker compose exec selfapp id
 
 The runtime image contains only the JRE and `app.jar`, and `id` reports `uid=1001`.
 
-## Health checks
+## Configuration
 
-Both images define a Docker `HEALTHCHECK`:
+All settings come from `.env`, which Compose reads automatically. `.env` is git-ignored;
+`.env.example` is the committed template. Compose stops with a clear error if a
+required password is missing.
 
-- **`selfapp`** calls Spring Boot Actuator at `/actuator/health`. This is the only   endpoint that is reachable without logging in.
-- **`selfweb`** requests `/` from Nginx.
+| Variable | Default | Purpose |
+|---|---|---|
+| `MYSQL_ROOT_PASSWORD` | *required* | MySQL root password |
+| `DB_NAME` | `selfapplite` | Database name, created on first start |
+| `DB_USER` | `selfuser` | Application database user |
+| `DB_PASS` | *required* | Application database password |
+| `RABBITMQ_USER` | `selfmq` | RabbitMQ user for the app and the management UI |
+| `RABBITMQ_PASS` | *required* | RabbitMQ password |
+| `DOCKERHUB_USER` | `yourname` | Docker Hub namespace used in the image tags |
 
-```bash
-docker inspect --format '{{.State.Health.Status}}' selfapp selfweb
-```
+The app receives these as `DB_*` and `MQ_*` environment variables and resolves them in
+`application.properties`.
 
 ## Publish to Docker Hub
 
 ```bash
 docker login
-export DOCKERHUB_USER=your_username
+# set DOCKERHUB_USER=your_username in .env
 docker compose build
 docker compose push selfapp selfweb
 ```
 
 This pushes `your_username/selfapp-lite:v1` and `your_username/selfapp-lite-web:v1`.
 
-## Configuration
-
-The app reads its database settings from environment variables, which are set in `docker-compose.yml` and resolved in `application.properties`:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DB_HOST` | `selfdb` | MySQL hostname (the Compose service name) |
-| `DB_PORT` | `3306` | MySQL port |
-| `DB_NAME` | `selfapplite` | Database name, created automatically if missing |
-| `DB_USER` / `DB_PASS` | `selfuser` / `selfpass` | Application database user |
-| `DOCKERHUB_USER` | `yourname` | Docker Hub namespace used in the image tags |
-
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `502 Bad Gateway` right after `docker compose up` | The app is still starting or waiting for MySQL. Wait 30 seconds, or follow it with `docker compose logs -f selfapp` |
+| `required variable MYSQL_ROOT_PASSWORD is missing a value` | You haven't created `.env`. Run `cp .env.example .env` and set the passwords |
+| `selfapp` is `unhealthy` and its logs show `Access denied for user 'selfuser'` | MySQL only reads its credentials when the volume is first created, so it still has the old password after you change `.env`. Reset it with `docker compose down -v`, then `docker compose up -d` |
 | `bind: address already in use` on port 80 | Another service is using port 80. Change the mapping in `docker-compose.yml` to `"8080:80"` and open `http://localhost:8080` |
 | Code changes don't show up | Rebuild the image: `docker compose up -d --build` |
 
@@ -215,22 +273,26 @@ docker compose down -v     # also delete the selfdb-data volume (wipes all users
 
 ```
 docker-buildlab-selfapp/
-├── docker-compose.yml                # 5 services, self-net network, selfdb-data volume
-├── .dockerignore                     # keeps .git, target/ and docs out of the build context
-├── .gitignore                        # Maven output, .env files, local AWS config
+├── docker-compose.yml                # 4 services, healthchecks, self-net network, selfdb-data volume
+├── .env.example                      # template for .env (passwords, Docker Hub user)
+├── .gitignore                        # .env, Maven output, .DS_Store
+├── LICENSE
 ├── app/                              # selfapp: Spring Boot application
 │   ├── Dockerfile                    # multi-stage: Maven build → JRE runtime, non-root, healthcheck
-│   ├── pom.xml                       # Spring Boot 3.3, Web, JPA, Security, Actuator, Thymeleaf
+│   ├── .dockerignore                 # keeps target/ and local files out of the build context
+│   ├── pom.xml                       # Spring Boot 3.3: Web, JPA, Security, Actuator, Thymeleaf, AMQP
 │   └── src/main/
 │       ├── java/com/example/selfapplite/
 │       │   ├── SelfappLiteApplication.java  # entry point
 │       │   ├── SecurityConfig.java          # form login, in-memory users, role-based access
 │       │   ├── LoginController.java         # serves the login page
-│       │   ├── UserController.java          # list, add and delete users (add/delete: ADMIN only)
+│       │   ├── UserController.java          # list, add, delete users; publishes user.created
 │       │   ├── User.java                    # JPA entity
-│       │   └── UserRepository.java          # Spring Data repository
+│       │   ├── UserRepository.java          # Spring Data repository
+│       │   ├── RabbitConfig.java            # declares the durable user.created queue
+│       │   └── UserCreatedListener.java     # consumes and logs user.created events
 │       └── resources/
-│           ├── application.properties       # DB settings from env vars, ddl-auto=update
+│           ├── application.properties       # DB and RabbitMQ settings from env vars, ddl-auto=update
 │           └── templates/
 │               ├── index.html               # user list + admin form
 │               └── login.html               # login form

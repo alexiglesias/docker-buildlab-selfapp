@@ -1,0 +1,7 @@
+# Build context is ./app, so this file must live here to take effect
+target/
+*.log
+*.md
+.DS_Store
+.idea/
+*.iml

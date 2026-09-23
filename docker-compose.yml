@@ -1,38 +1,43 @@
-
 services:
   selfdb:
     image: mysql:8.0
     container_name: selfdb
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass
-      MYSQL_DATABASE: selfapplite
-      MYSQL_USER: selfuser
-      MYSQL_PASSWORD: selfpass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${DB_NAME:-selfapplite}
+      MYSQL_USER: ${DB_USER:-selfuser}
+      MYSQL_PASSWORD: ${DB_PASS:?Set DB_PASS in .env}
     volumes:
       - selfdb-data:/var/lib/mysql
     networks:
       - self-net
-
-  # Included to preserve the multi-service orchestration exercise.
-  # The sample app doesn't use these yet - wiring them in is a good
-  # stretch task once the base stack is working.
-  selfcache:
-    image: memcached:1.6-alpine
-    container_name: selfcache
-    restart: unless-stopped
-    networks:
-      - self-net
+    healthcheck:
+      # 127.0.0.1 forces TCP: passes only once the real server is up,
+      # not the temporary one MySQL runs during first-time initialisation
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   selfmq:
     image: rabbitmq:3.13-management-alpine
     container_name: selfmq
     restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-selfmq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:?Set RABBITMQ_PASS in .env}
+    ports:
+      - "15672:15672"   # management UI only; AMQP (5672) stays internal
     networks:
       - self-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   selfapp:
     build: ./app
@@ -40,13 +45,20 @@ services:
     container_name: selfapp
     restart: unless-stopped
     depends_on:
-      - selfdb
+      selfdb:
+        condition: service_healthy
+      selfmq:
+        condition: service_healthy
     environment:
       DB_HOST: selfdb
       DB_PORT: 3306
-      DB_NAME: selfapplite
-      DB_USER: selfuser
-      DB_PASS: selfpass
+      DB_NAME: ${DB_NAME:-selfapplite}
+      DB_USER: ${DB_USER:-selfuser}
+      DB_PASS: ${DB_PASS:?Set DB_PASS in .env}
+      MQ_HOST: selfmq
+      MQ_PORT: 5672
+      MQ_USER: ${RABBITMQ_USER:-selfmq}
+      MQ_PASS: ${RABBITMQ_PASS:?Set RABBITMQ_PASS in .env}
     networks:
       - self-net
 
@@ -56,7 +68,8 @@ services:
     container_name: selfweb
     restart: unless-stopped
     depends_on:
-      - selfapp
+      selfapp:
+        condition: service_healthy
     ports:
       - "80:80"
     networks:

@@ -205,7 +205,7 @@ curl http://localhost/actuator/health     # {"status":"DOWN"}
 docker compose start selfmq
 ```
 
-`/actuator/health` and `/login` are the only endpoints reachable without logging in.
+Through Nginx (port 80), `/actuator/health` and `/login` are the only endpoints reachable without logging in. `/actuator/prometheus` (metrics for [observability-selfapp](https://github.com/alexiglesias/observability-selfapp)) needs no login either, but only inside the Docker network: Nginx returns 404 for it on port 80.
 
 ## Verifying the multi-stage build
 
@@ -280,7 +280,7 @@ docker-buildlab-selfapp/
 ├── app/                              # selfapp: Spring Boot application
 │   ├── Dockerfile                    # multi-stage: Maven build → JRE runtime, non-root, healthcheck
 │   ├── .dockerignore                 # keeps target/ and local files out of the build context
-│   ├── pom.xml                       # Spring Boot 3.3: Web, JPA, Security, Actuator, Thymeleaf, AMQP
+│   ├── pom.xml                       # Spring Boot 3.3: Web, JPA, Security, Actuator + Prometheus metrics, Thymeleaf, AMQP
 │   └── src/main/
 │       ├── java/com/example/selfapplite/
 │       │   ├── SelfappLiteApplication.java  # entry point
@@ -292,7 +292,7 @@ docker-buildlab-selfapp/
 │       │   ├── RabbitConfig.java            # declares the durable user.created queue
 │       │   └── UserCreatedListener.java     # consumes and logs user.created events
 │       └── resources/
-│           ├── application.properties       # DB and RabbitMQ settings from env vars, ddl-auto=update
+│           ├── application.properties       # DB and RabbitMQ settings from env vars, ddl-auto=update, Actuator/metrics
 │           └── templates/
 │               ├── index.html               # user list + admin form
 │               └── login.html               # login form

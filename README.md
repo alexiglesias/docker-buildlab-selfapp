@@ -309,6 +309,9 @@ This repo is the base for the rest of the selfapp series:
   CI/CD pipeline that tests, builds, scans and deploys these images
 - [`k8s-selfapp-minikube`](https://github.com/alexiglesias/k8s-selfapp-minikube):
   the same stack on Kubernetes, packaged as a Helm chart
+- [`observability-selfapp`](https://github.com/alexiglesias/observability-selfapp):
+  Prometheus, Grafana, Loki and Slack alerts for this app, attached to its
+  network, with an end-to-end test in CI
 
 ## License
 

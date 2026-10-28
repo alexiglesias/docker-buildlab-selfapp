@@ -1,5 +1,8 @@
 # ---------- Stage 1: BUILD ----------
-FROM maven:3.9-eclipse-temurin-17 AS BUILD
+# --platform=$BUILDPLATFORM: always run Maven on the build machine's own CPU.
+# A .jar is the same on Intel and ARM, so there is no need to compile it
+# twice (or under slow CPU emulation) when building a multi-arch image.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-17 AS BUILD
 
 WORKDIR /src
 
@@ -8,6 +11,7 @@ COPY pom.xml .
 RUN mvn -B dependency:go-offline
 
 COPY src ./src
+# Tests run in CI (mvn test) before the image is built, so skip them here
 RUN mvn -B clean package -DskipTests
 
 # ---------- Stage 2: RUNTIME ----------

@@ -1,0 +1,123 @@
+# CD: deploys the images CI built and Trivy scanned to Minikube on Alex's
+# Mac, using the Helm chart from k8s-selfapp-minikube.
+#
+# It runs on a SELF-HOSTED runner: GitHub's cloud machines can't reach a
+# Minikube cluster on a laptop, so the laptop itself runs this job.
+# It only starts by hand (Actions -> CD -> Run workflow), never on a push
+# or a pull request, so nobody else's code can run on the Mac.
+#
+# What it deploys: aiglesiasreguant/selfapp-lite(-web):<tag> from Docker
+# Hub, where <tag> is a commit SHA from CI (default: the newest commit on
+# main). It upgrades the existing "prod" release (namespace selfapp-prod)
+# created once with `./scripts/deploy.sh prod`, keeping its passwords and
+# changing only the images. If the new version doesn't become healthy,
+# it rolls back to the previous one.
+
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy: a commit SHA from CI (empty = newest commit on main)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# Never run two deploys at the same time; queue the second one instead
+concurrency:
+  group: cd-minikube
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Minikube (selfapp-prod)
+    runs-on: [self-hosted, macOS, minikube]
+    timeout-minutes: 20
+    # Shows each deploy under the repo's "Deployments" with its history
+    environment: minikube
+    env:
+      TAG: ${{ inputs.tag || github.sha }}
+      APP_IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/selfapp-lite
+      WEB_IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/selfapp-lite-web
+      KUBE_CONTEXT: minikube
+      NAMESPACE: selfapp-prod
+      RELEASE: selfapp
+    steps:
+      - name: Only deploy from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Deploys only run from main (this run is on ${GITHUB_REF})."
+          exit 1
+
+      - name: Get the Helm chart (k8s-selfapp-minikube)
+        uses: actions/checkout@v7
+        with:
+          repository: alexiglesias/k8s-selfapp-minikube
+          ref: main
+          path: k8s-selfapp-minikube
+
+      - name: Pre-flight checks
+        run: |
+          for tool in docker minikube kubectl helm; do
+            command -v "$tool" >/dev/null || { echo "::error::$tool is not installed on this runner"; exit 1; }
+          done
+          minikube status >/dev/null || { echo "::error::Minikube isn't running. Run: minikube start"; exit 1; }
+          helm status "$RELEASE" -n "$NAMESPACE" --kube-context "$KUBE_CONTEXT" >/dev/null || {
+            echo "::error::No '$RELEASE' release in $NAMESPACE. Create it once with: ./scripts/deploy.sh prod"
+            exit 1
+          }
+          for image in "$APP_IMAGE:$TAG" "$WEB_IMAGE:$TAG"; do
+            docker buildx imagetools inspect "$image" >/dev/null || {
+              echo "::error::$image is not on Docker Hub. Did CI pass for this commit?"
+              exit 1
+            }
+          done
+          echo "Deploying tag $TAG"
+
+      - name: helm upgrade
+        id: deploy
+        run: |
+          # --reset-then-reuse-values: keep this release's own values
+          # (passwords, replicas) and only change what's set below
+          helm upgrade "$RELEASE" k8s-selfapp-minikube/charts/selfapp \
+            --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" \
+            --reset-then-reuse-values \
+            --set app.image.repository="$APP_IMAGE" \
+            --set app.image.tag="$TAG" \
+            --set app.image.pullPolicy=IfNotPresent \
+            --set web.image.repository="$WEB_IMAGE" \
+            --set web.image.tag="$TAG" \
+            --set web.image.pullPolicy=IfNotPresent \
+            --wait --timeout 10m
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" exec "deploy/$RELEASE-app" -- \
+            wget -qO- http://localhost:8080/actuator/health | tee /dev/stderr | grep -q '"UP"'
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" exec "deploy/$RELEASE-web" -- \
+            wget -qO- http://127.0.0.1/actuator/health | grep -q '"UP"'
+
+      - name: Roll back to the previous version
+        if: failure() && (steps.deploy.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        run: |
+          echo "::error::Deploy of $TAG failed, rolling back"
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get pods || true
+          helm rollback "$RELEASE" -n "$NAMESPACE" --kube-context "$KUBE_CONTEXT" --wait --timeout 10m
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy to Minikube: ${{ job.status }}"
+            echo "Requested tag: \`$TAG\`"
+            echo '```'
+            kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" get deploy \
+              -o custom-columns='NAME:.metadata.name,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[0].image'
+            echo
+            helm history "$RELEASE" -n "$NAMESPACE" --kube-context "$KUBE_CONTEXT" --max 5
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" 2>&1 || true

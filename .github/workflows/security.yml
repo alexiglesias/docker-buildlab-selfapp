@@ -1,0 +1,90 @@
+# Security scan: Trivy checks both images for known vulnerabilities (CVEs)
+# and the results appear in the repo's Security tab -> Code scanning.
+#
+# When it runs:
+#   - after CI finishes successfully on main, scanning the exact images
+#     CI just pushed (tag = that commit's SHA, never :latest)
+#   - every Monday, on :latest: new CVEs are published every day, so an
+#     image that was clean last week may not be clean today
+#   - by hand (Actions -> Security scan -> Run workflow), on :latest
+#
+# It reports, it doesn't block: the job stays green and the findings are
+# triaged in the Security tab. Only CRITICAL and HIGH issues that already
+# have a fix are reported, to keep the list actionable.
+#
+# Supply chain: Trivy's GitHub Actions were hijacked in March 2026
+# (CVE-2026-33634). trivy-action is pinned to the full SHA of v0.36.0,
+# released after the incident, and the Trivy version is set explicitly.
+
+name: Security scan
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy (${{ matrix.image }})
+    # After CI: only if CI passed and it was a real push to main (not a PR)
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload results to the Security tab
+      actions: read # lets the upload read this run's details
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [selfapp-lite, selfapp-lite-web]
+    env:
+      # After CI: the commit CI built. Otherwise: :latest
+      TAG: ${{ github.event.workflow_run.head_sha || 'latest' }}
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT }}
+
+      - name: Scan ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ env.TAG }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          scan-type: image
+          image-ref: ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ env.TAG }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: "0" # report only, never fail the job
+
+      - name: Upload to the Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }} # keeps the two images' results separate
+          sha: ${{ env.COMMIT }}
+          ref: ${{ github.event_name == 'workflow_run' && format('refs/heads/{0}', github.event.workflow_run.head_branch) || github.ref }}
+
+      - name: Summary
+        env:
+          IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ env.TAG }}
+          SARIF: trivy-${{ matrix.image }}.sarif
+        run: |
+          COUNT=$(jq '[.runs[].results[]] | length' "$SARIF")
+          {
+            echo "### Trivy: \`${IMAGE}\`"
+            echo "${COUNT} fixable CRITICAL/HIGH finding(s). Details: Security tab -> Code scanning."
+          } >> "$GITHUB_STEP_SUMMARY"

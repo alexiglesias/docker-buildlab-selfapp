@@ -1,0 +1,117 @@
+# CI: runs on every pull request and on every push to main.
+#
+#   1. test  - mvn test: the app's unit tests, no database or broker needed.
+#   2. build - builds both images (app and web) for Intel (amd64) and
+#              ARM (arm64), so they also run on Apple Silicon / Minikube.
+#              On pull requests the images are only built, as a check.
+#              On main they are also pushed to Docker Hub, tagged with
+#              the commit SHA (never changes) and :latest (always newest).
+#
+# Needs: repo variable DOCKERHUB_USERNAME and repo secret DOCKERHUB_TOKEN.
+# GitHub's own actions use version tags; third-party actions are pinned
+# to a full commit SHA, so a hijacked tag can't change what runs here.
+# Everything runs on GitHub's free runners.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same PR/branch cancels the run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven # reuses downloaded libraries between runs
+
+      - name: mvn test
+        run: mvn -B test
+
+      - name: Keep the test reports if something failed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: app/target/surefire-reports/
+
+  build:
+    name: Build image (${{ matrix.image }})
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: selfapp-lite
+            context: app
+          - image: selfapp-lite-web
+            context: web
+    env:
+      # Push only from main, never from a pull request
+      PUSH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+      IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # QEMU lets this Intel runner build the ARM version of the image
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      # Buildx is the Docker builder that can build several platforms at once
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Docker Hub
+        if: env.PUSH == 'true'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build${{ env.PUSH == 'true' && ' and push' || '' }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          # Layer cache stored in GitHub (free), one per image
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Summary
+        if: env.PUSH == 'true'
+        run: |
+          {
+            echo "### Pushed \`${IMAGE}\`"
+            echo "- \`${IMAGE}:${GITHUB_SHA}\`"
+            echo "- \`${IMAGE}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

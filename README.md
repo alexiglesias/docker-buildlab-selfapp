@@ -5,7 +5,11 @@
 > Every service has a health check and starts only when its dependencies are healthy.
 > The app image ships only a JRE and the compiled `.jar` and runs as a non-root user.
 > Secrets stay in a git-ignored `.env`. Runs on any machine with Docker, including Apple Silicon Macs.
+> A GitHub Actions pipeline tests every change, builds multi-arch images, scans them with
+> Trivy and deploys them to Minikube.
 
+[![CI](https://github.com/alexiglesias/docker-buildlab-selfapp/actions/workflows/ci.yml/badge.svg)](https://github.com/alexiglesias/docker-buildlab-selfapp/actions/workflows/ci.yml)
+[![Security scan](https://github.com/alexiglesias/docker-buildlab-selfapp/actions/workflows/security.yml/badge.svg)](https://github.com/alexiglesias/docker-buildlab-selfapp/actions/workflows/security.yml)
 [![docker](https://img.shields.io/badge/docker%20compose-v2-blue)](https://docs.docker.com/compose/)
 [![services](https://img.shields.io/badge/services-4-brightgreen)](./docker-compose.yml)
 [![java](https://img.shields.io/badge/java-17-orange)](https://adoptium.net/)
@@ -88,7 +92,7 @@ volume and survives container restarts and rebuilds.
 flowchart LR
     SRC["<b>Build context</b><br/>pom.xml + src/"]
 
-    subgraph S1["Stage 1 · BUILD · maven:3.9-eclipse-temurin-17"]
+    subgraph S1["Stage 1 · BUILD · maven:3.9-eclipse-temurin-17 · build platform"]
         direction TB
         D1["COPY pom.xml<br/>mvn dependency:go-offline<br/><i>cached layer</i>"]
         D2["COPY src<br/>mvn clean package"]
@@ -116,6 +120,10 @@ flowchart LR
 Dependencies are downloaded in their own layer, before the source code is copied in.
 Changing a Java file therefore only rebuilds the last layers, and Maven does not
 re-download every dependency on each build.
+
+Stage 1 runs on the build machine's own CPU (`FROM --platform=$BUILDPLATFORM`). A `.jar`
+is the same on Intel and ARM, so a multi-arch build compiles it once, natively, and only
+the small runtime stage is emulated.
 
 ### Service responsibilities
 
@@ -241,16 +249,69 @@ required password is missing.
 The app receives these as `DB_*` and `MQ_*` environment variables and resolves them in
 `application.properties`.
 
-## Publish to Docker Hub
+## CI/CD
 
-```bash
-docker login
-# set DOCKERHUB_USER=your_username in .env
-docker compose build
-docker compose push selfapp selfweb
+Three GitHub Actions workflows in [`.github/workflows/`](./.github/workflows) take a change
+from a pull request to a running deployment. Everything runs on GitHub's free tier, except
+the deploy, which runs on a self-hosted runner on my Mac.
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'linear', 'nodeSpacing': 30, 'rankSpacing': 45}}}%%
+flowchart LR
+    PR["Pull request<br/>or push to main"] --> CI["<b>ci.yml</b><br/>mvn test<br/>build amd64 + arm64"]
+    CI -->|"main only:<br/>push :sha + :latest"| HUB[("Docker Hub")]
+    CI -->|"after success<br/>on main"| SEC["<b>security.yml</b><br/>Trivy scan of :sha<br/>+ weekly rescan"]
+    SEC --> TAB["Security tab"]
+    BTN["Run workflow<br/>(manual)"] --> CD["<b>cd.yml</b><br/>self-hosted runner<br/>helm upgrade :sha"]
+    HUB --> CD
+    CD --> K8S["Minikube<br/>selfapp-prod"]
+    linkStyle default stroke:#888780,stroke-width:1.5px
 ```
 
-This pushes `your_username/selfapp-lite:v1` and `your_username/selfapp-lite-web:v1`.
+| Workflow | Runs | What it does |
+|---|---|---|
+| [`ci.yml`](./.github/workflows/ci.yml) | Every pull request and push to `main` | Runs the unit tests, then builds both images for `linux/amd64` and `linux/arm64`. On `main` it also pushes them to Docker Hub as `:<commit sha>` and `:latest` |
+| [`security.yml`](./.github/workflows/security.yml) | After CI succeeds on `main`, every Monday, or by hand | Trivy scans both images for fixable CRITICAL and HIGH CVEs and uploads the results to **Security → Code scanning**. It reports without blocking |
+| [`cd.yml`](./.github/workflows/cd.yml) | By hand only (**Actions → CD → Run workflow**) | On a self-hosted runner, upgrades the `selfapp-prod` Helm release from [k8s-selfapp-minikube](https://github.com/alexiglesias/k8s-selfapp-minikube) to the chosen `:<sha>` images, runs a smoke test and rolls back on failure |
+
+Design choices:
+
+- **The tested image is the deployed image.** Security scans and deploys always use the
+  immutable `:<sha>` tag, never `:latest`.
+- **Least privilege.** Every workflow is read-only by default; only the Trivy job may write
+  to the Security tab.
+- **Pinned third-party actions.** Docker's and Trivy's actions are pinned to a full commit
+  SHA, so a hijacked tag can't change what runs. Trivy's actions were compromised in March
+  2026 ([CVE-2026-33634](https://nvd.nist.gov/vuln/detail/cve-2026-33634)); the pinned
+  version was released after the fix.
+- **The self-hosted runner is closed by default.** `cd.yml` can't be started by a push or
+  a pull request, pull requests from outside contributors need approval, and the runner
+  only runs (`./run.sh`) while I'm deploying.
+- **Deploys fail on drift.** If someone changes a Helm-managed object by hand, `helm upgrade`
+  stops with a conflict instead of silently overwriting it.
+
+**Setup** (repo **Settings → Secrets and variables → Actions**):
+
+| Name | Kind | Value |
+|---|---|---|
+| `DOCKERHUB_USERNAME` | Variable | Docker Hub user. A variable, not a secret, so image names stay readable in the logs |
+| `DOCKERHUB_TOKEN` | Secret | Docker Hub personal access token with Read & Write access |
+
+**Run the tests locally** (no Java needed):
+
+```bash
+cd app && docker run --rm -v "$PWD":/src -w /src maven:3.9-eclipse-temurin-17 mvn -B test
+```
+
+**Publish by hand** (without CI): set `DOCKERHUB_USER` in `.env`, then
+`docker login && docker compose build && docker compose push selfapp selfweb`. This pushes
+the `:v1` tags.
+
+| CI problem | Fix |
+|---|---|
+| `invalid tag "/selfapp-lite:…"` | The `DOCKERHUB_USERNAME` variable is missing from this repo. `gh variable list -R alexiglesias/docker-buildlab-selfapp` |
+| CD job stays queued | The self-hosted runner is offline or lacks the `minikube` label |
+| CD fails with `conflict with "kubectl-patch"` | A Helm-managed object was changed by hand. See k8s-selfapp-minikube's troubleshooting |
 
 ## Troubleshooting
 
@@ -275,12 +336,15 @@ docker compose down -v     # also delete the selfdb-data volume (wipes all users
 docker-buildlab-selfapp/
 ├── docker-compose.yml                # 4 services, healthchecks, self-net network, selfdb-data volume
 ├── .env.example                      # template for .env (passwords, Docker Hub user)
+├── .github/workflows/                # ci.yml, security.yml, cd.yml (see CI/CD)
 ├── .gitignore                        # .env, Maven output, .DS_Store
 ├── LICENSE
 ├── app/                              # selfapp: Spring Boot application
 │   ├── Dockerfile                    # multi-stage: Maven build → JRE runtime, non-root, healthcheck
 │   ├── .dockerignore                 # keeps target/ and local files out of the build context
 │   ├── pom.xml                       # Spring Boot 3.3: Web, JPA, Security, Actuator + Prometheus metrics, Thymeleaf, AMQP
+│   ├── src/test/java/com/example/selfapplite/
+│   │   └── UserControllerTest.java   # web-layer tests: login, roles, RabbitMQ fallback (mocked DB and broker)
 │   └── src/main/
 │       ├── java/com/example/selfapplite/
 │       │   ├── SelfappLiteApplication.java  # entry point
@@ -305,8 +369,6 @@ docker-buildlab-selfapp/
 
 This repo is the base for the rest of the selfapp series:
 
-- [`cicd-github-actions-selfapp`](https://github.com/alexiglesias/cicd-github-actions-selfapp):
-  CI/CD pipeline that tests, builds, scans and deploys these images
 - [`k8s-selfapp-minikube`](https://github.com/alexiglesias/k8s-selfapp-minikube):
   the same stack on Kubernetes, packaged as a Helm chart
 - [`observability-selfapp`](https://github.com/alexiglesias/observability-selfapp):
